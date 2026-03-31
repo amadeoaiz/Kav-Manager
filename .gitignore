@@ -1,0 +1,58 @@
+# Python
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.eggs/
+*.egg-info/
+
+# Virtual environments
+venv/
+venv_*/
+.venv/
+env/
+
+# Database and runtime data
+data/
+*.db
+*.db-journal
+*.sqlite3
+nio_store/
+
+# PyInstaller build artifacts
+dist/
+build/
+
+# Security / Secrets
+.env
+*.token
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test / Maintenance caches
+.pytest_cache/
+.hypothesis/
+.last_maint
+
+# Archives
+*.zip
+
+# Temporary
+*.tmp
+*.log
+
+# Docs (internal dev notes, design docs — not for public repo)
+docs/
+
+# Internal dev files
+SESSION_HANDOFF.md
+diag_windows.py
+scripts/generate_icons.py

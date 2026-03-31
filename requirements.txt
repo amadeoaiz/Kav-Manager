@@ -1,0 +1,11 @@
+PyQt6
+sqlalchemy
+matrix-nio[e2e]
+cryptography
+pulp
+numpy
+matplotlib
+fpdf2
+Pillow
+gspread
+pytest

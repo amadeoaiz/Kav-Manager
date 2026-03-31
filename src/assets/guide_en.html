@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<style id="theme-css">
+/* Injected at runtime by KavManager */
+</style>
+</head>
+<body>
+<div class="toc">
+    <div class="toc-title">TABLE OF CONTENTS</div>
+    <ol>
+        <li><a href="#welcome">Welcome -- What is Kav?</a></li>
+        <li><a href="#engine">How the Engine Works</a></li>
+        <li><a href="#setup">First-Time Setup</a></li>
+        <li><a href="#matrix">Matrix Bot Setup</a></li>
+        <li><a href="#soldiers">Adding Soldiers</a></li>
+        <li><a href="#readiness">Readiness, Presence Grid &amp; Leave</a></li>
+        <li><a href="#tasks">Creating Tasks</a></li>
+        <li><a href="#reconcile">Running the Schedule (Reconcile)</a></li>
+        <li><a href="#manual">Manual Adjustments</a></li>
+        <li><a href="#stats">Statistics</a></li>
+        <li><a href="#exports">Exports</a></li>
+        <li><a href="#bot">The Matrix Bot -- Commands</a></li>
+        <li><a href="#tips">Tips &amp; Troubleshooting</a></li>
+    </ol>
+</div>
+
+<h1><a name="welcome"></a>1. Welcome -- What is Kav?</h1>
+
+<p>
+KavManager is a desktop application for reserve unit commanders. It tracks
+soldier presence, manages mission tasks, and generates fair duty schedules
+using a linear programming (LP) solver. It includes a Matrix chat bot that
+lets soldiers view schedules, swap shifts, manage gear, report issues, and
+log unplanned tasks.
+</p>
+
+<hr class="separator"/>
+
+<h1><a name="engine"></a>2. How the Engine Works</h1>
+
+<p>
+The scheduling engine divides time into <b>day</b> and <b>night</b> periods
+(the boundary defaults to 23:00-07:00, configurable in Settings). Each period
+is split into uniform time blocks -- typically 60 to 120 minutes long. A
+linear programming solver then assigns soldiers to blocks, optimizing for
+three things simultaneously: <b>fair workload distribution</b>,
+<b>adequate rest spacing</b>, and <b>full task coverage</b>.
+</p>
+<p>
+Day and night are treated as <b>independent fairness domains</b> -- the solver
+balances day workload separately from night workload. A soldier's day hours
+and night hours are tracked independently. The solver tries multiple block
+lengths (60-180 minutes) and picks the configuration that produces the best
+overall schedule.
+</p>
+<p>
+Tasks can be <b>fractionable</b> (split into blocks across multiple soldiers)
+or <b>fixed</b> (all assigned soldiers stay for the entire duration -- no
+rotation or block-splitting). Hardship scores
+(1-5) weight how much each task "costs" a soldier in fairness terms -- a
+difficulty-5 guard post counts five times more than a difficulty-1 admin task
+when balancing loads.
+</p>
+
+<h2>How Fairness Works</h2>
+<p>
+The solver remembers who worked more than their fair share recently and gives
+them a break next time. Here is how:
+</p>
+<ul>
+    <li><b>Recent history matters most.</b> The solver looks at each soldier's
+        hours over the past 14 days compared to the daily unit average. Recent
+        days count much more than older days -- work from two weeks ago barely
+        registers. No one carries a permanent debt.</li>
+    <li><b>Excess drives assignment cost.</b> If a soldier worked more than
+        average recently, they become more "expensive" to assign. The solver
+        naturally prefers soldiers who have worked less, evening things out
+        over time.</li>
+    <li><b>Within each schedule run</b>, the solver also balances total hours
+        across all present soldiers -- it tries to minimize both the average
+        gap from fair share and the worst individual gap.</li>
+    <li><b>Day and night are independent.</b> Day hours do not affect night
+        fairness and vice versa. A soldier who did many day shifts does not
+        get compensated with fewer night shifts -- each domain is balanced
+        on its own.</li>
+    <li><b>Returning soldiers start fresh.</b> A soldier who was absent
+        returns with zero recent excess. They are not punished for being
+        away, nor do they have banked credit from before -- everyone is
+        measured by what they actually worked in the recent window.</li>
+</ul>
+
+<div class="tip">
+<span class="tip-label">NOTE:</span> The schedule optimizes over the
+<em>entire planning window</em>, not just one day. If a soldier appears
+over-assigned today, it may be because they were idle for the past three days.
+Check the Stats tab for the full picture.
+</div>
+
+<hr class="separator"/>
+
+<h1><a name="setup"></a>3. First-Time Setup</h1>
+
+<h2>Basic Configuration</h2>
+<p>Open the <b>SETTINGS</b> tab. Under the <b>UNIT</b> sub-tab:</p>
+<ul>
+    <li><b>Unit name</b> -- your unit's codename or identifier (shown in the title bar).</li>
+    <li><b>Night window</b> -- the hours that define "night" for scheduling purposes
+        (default: 23:00 start, 07:00 end). Tasks during these hours are balanced
+        separately from daytime tasks.</li>
+    <li><b>Reserve period start/end</b> -- the dates of your current reserve stint.
+        The app auto-detects boundaries from draft/presence intervals, but you can
+        override them here. This controls which date range the Stats tab and solver
+        consider.</li>
+</ul>
+
+<h2>Chain of Command</h2>
+<p>Also in the <b>UNIT</b> sub-tab, set up to three soldiers as your
+command chain (primary, secondary, tertiary). The app automatically resolves
+which commander is "active" at any given time based on presence -- if the
+primary is absent, it falls through to the secondary, then tertiary.</p>
+<p>
+By default, the active commander is <b>excluded</b> from task assignments.
+You can override this per-task using the "Include Commander" toggle in the
+task dialog.
+</p>
+
+<hr class="separator"/>
+
+<h1><a name="matrix"></a>4. Matrix Bot Setup</h1>
+
+<h2>Why Matrix?</h2>
+<p>
+Matrix is an open, decentralized communication protocol with end-to-end
+encryption enabled by default. Messages between soldiers and the bot are
+encrypted and cannot be read by third parties. Matrix is not owned by any
+company, and there is no data harvesting or advertising. The protocol is
+federated: soldiers can use any Matrix server and still communicate with
+the bot.
+</p>
+
+<h2>Commander Setup</h2>
+<ol>
+    <li><b>Create a bot account</b> on a Matrix server (e.g., matrix.org).
+        Go to the server's registration page and create an account that will
+        serve as the bot (e.g., <code>@kavbot:matrix.org</code>).</li>
+    <li><b>Download a Matrix client</b> (e.g., Element -- available on desktop
+        and mobile) and log in with the bot account. This is needed to get the
+        access token.</li>
+    <li><b>Get the bot's access token.</b> In Element: Settings &gt; Help &amp;
+        About &gt; scroll to "Access Token" (under Advanced). Copy it.</li>
+    <li>In KavManager, go to <b>SETTINGS &gt; MATRIX CHAT</b> sub-tab. Enter:
+        <ul>
+            <li><b>Homeserver URL</b> -- the server URL
+                (e.g., <code>https://matrix.org</code>)</li>
+            <li><b>Bot username</b> -- the bot's full Matrix ID
+                (e.g., <code>@kavbot:matrix.org</code>)</li>
+            <li><b>Access token</b> -- the token copied from Element</li>
+        </ul>
+    </li>
+    <li><b>Save and restart</b> the app. The bot starts automatically if
+        configured. Check the terminal output for
+        <code>[BOT] Matrix bot starting in background</code> to confirm.</li>
+</ol>
+
+<h2>What to Tell Your Soldiers</h2>
+<ol>
+    <li>Each soldier downloads a Matrix client (Element app on phone or desktop).</li>
+    <li>Each soldier creates a Matrix account (on the same server as the bot, or
+        any federated Matrix server).</li>
+    <li>Each soldier sends a direct message to the bot account -- the bot will
+        greet them and ask them to select a language (English or Hebrew).</li>
+    <li>The commander must enter each soldier's Matrix ID
+        (e.g., <code>@name:matrix.org</code>) in their soldier record on the
+        <b>SOLDIERS</b> tab. Without this link, the bot cannot identify them.</li>
+</ol>
+
+<h2>What the Bot Can Do</h2>
+<ul>
+    <li><b>All soldiers:</b> view schedule, team schedule, tasks, stats, swap
+        shifts, manage gear, report issues, log unplanned tasks.</li>
+    <li><b>Privileged users</b> (command chain + Sargent role): commander menu
+        (readiness, stats, create task, create from template, reconcile) and
+        notification settings.</li>
+</ul>
+
+<hr class="separator"/>
+
+<h1><a name="soldiers"></a>5. Adding Soldiers</h1>
+
+<p>Go to the <b>SOLDIERS</b> tab.</p>
+
+<h2>Creating a Soldier Record</h2>
+<ul>
+    <li>Click <b>Add Soldier</b> and fill in: name, phone number, Matrix ID, and roles.</li>
+    <li><b>Roles:</b> Every soldier implicitly has the "Soldier" base role -- you
+        never need to assign it. Specialized roles (Driver, Medic, etc.) are
+        <em>addons</em> on top of that. A soldier with the "Driver" role can still
+        be assigned to any task requiring "Soldier".</li>
+    <li><b>Matrix ID:</b> Enter the soldier's Matrix username
+        (e.g., <code>@yoavi:matrix.org</code>) so the bot can identify them.</li>
+</ul>
+
+<hr class="separator"/>
+
+<h1><a name="readiness"></a>6. Readiness, Presence Grid &amp; Leave</h1>
+
+<h2>The Presence Grid</h2>
+<p>
+The <b>GRID</b> tab shows a monthly board with rows for soldiers and columns
+for days. Each cell displays the soldier's status for that day:
+</p>
+<ul>
+    <li><b>Present</b> (green) -- soldier is on base for the full day.</li>
+    <li><b>Partially present</b> (amber) -- soldier is on base for part of
+        the day (arrival/departure times are recorded).</li>
+    <li><b>Absent</b> (red) -- soldier is not on base.</li>
+    <li><b>Drafted, no data</b> (grey) -- soldier is in the reserve rotation
+        but no presence has been recorded for this day yet.</li>
+    <li><b>Not drafted</b> (blank) -- soldier is not in the reserve rotation.</li>
+</ul>
+<p>
+Right-click a cell to mark a soldier as present, partially present, or absent.
+You can also select a range of days and apply a status to all of them at once.
+Right-click a soldier's name to toggle their drafted status or set them as
+"Active for entire reserve period."
+</p>
+
+<h2>Draft Intervals vs Presence Intervals</h2>
+<ul>
+    <li><b>Draft intervals</b> define the period during which a soldier is
+        drafted for reserve duty. Being drafted does not mean the soldier is
+        present on base -- it means they are part of the active rotation.
+        A soldier can be drafted but absent (on leave, sick, etc.).</li>
+    <li><b>Presence intervals</b> record when a soldier is actually on base.
+        Only soldiers with presence status "Present" are eligible for task
+        assignments.</li>
+</ul>
+
+<h2>Unit Readiness</h2>
+<p>
+The <b>HOME</b> tab displays a monthly calendar where each day is color-coded
+by readiness status:
+</p>
+<ul>
+    <li><b>Surplus</b> (bright green) -- more present soldiers than required.</li>
+    <li><b>OK</b> (medium green) -- present soldiers meet requirements exactly.</li>
+    <li><b>Partial</b> (amber) -- below requirements but close.</li>
+    <li><b>Critical</b> (red) -- below minimum, uncovered tasks, or missing
+        required roles.</li>
+    <li><b>Empty</b> (dim) -- no tasks or requirements set for this day.</li>
+</ul>
+<p>
+Readiness is computed by comparing the number of present soldiers (and their
+roles) against the combined requirements from active tasks and mission
+requirements for that day.
+</p>
+
+<h2>Mission Requirements</h2>
+<p>
+Mission requirements define the minimum staffing levels for a date range,
+independent of specific tasks. They are configured on the <b>HOME</b> tab
+by right-clicking a day on the calendar.
+</p>
+<ul>
+    <li>Set a <b>label</b> (e.g., "Exercise Alpha"), <b>minimum soldiers</b>,
+        and <b>required roles</b> (e.g., 2x Driver, 1x Medic).</li>
+    <li>Requirements can span multiple days. When multiple requirements overlap
+        on a day, the strictest values are used (maximum min_soldiers, union of
+        required roles).</li>
+    <li>Readiness status combines both mission requirements and active task
+        demands.</li>
+</ul>
+
+<h2>Leave and Replacements</h2>
+<p>
+When a soldier requests leave, the app can find replacement plans to maintain
+readiness. On the <b>SOLDIERS</b> tab, select a soldier and use the leave
+coverage tool.
+</p>
+<ul>
+    <li>The solver identifies <b>critical days</b> -- days where the unit drops
+        below mission readiness without the requesting soldier.</li>
+    <li>It then searches for replacement candidates among other soldiers,
+        ranked by least disruption (fewest already-planned present days).</li>
+    <li><b>Single replacement:</b> one soldier covers all critical days.</li>
+    <li><b>Split replacement:</b> two soldiers split the critical days between
+        them.</li>
+    <li>Applying a solution marks the requesting soldier as absent for the leave
+        period and marks replacements as present on their assigned days.</li>
+</ul>
+
+<hr class="separator"/>
+
+<h1><a name="tasks"></a>7. Creating Tasks</h1>
+
+<p>Go to the <b>TASKS</b> tab.</p>
+
+<h2>Task Fields</h2>
+<ul>
+    <li><b>Name:</b> The task name. You can also select a saved template from the
+        dropdown -- it will auto-fill all fields with smart date defaults.</li>
+    <li><b>Start / End time:</b> The task window. Times snap to a 15-minute grid
+        (e.g., 08:00, 08:15, 08:30, 08:45).</li>
+    <li><b>Soldier count:</b> How many soldiers are needed simultaneously.</li>
+    <li><b>Difficulty (1-5):</b> The hardship score. Higher difficulty means the task
+        "costs" more in fairness calculations -- the solver accounts for this when
+        balancing workloads.</li>
+    <li><b>Roles:</b> Which roles are required (e.g., 1x Driver, 2x Soldier).
+        Only soldiers with matching roles are eligible.</li>
+    <li><b>Fractionable:</b> When ON, the task is split into fair time blocks across
+        multiple soldiers (e.g., a 6-hour guard post becomes 4x 90-minute shifts).
+        When OFF, the assigned soldiers cover the entire window with no
+        rotation -- all stay for the full duration.</li>
+</ul>
+
+<h2>Eligibility Controls</h2>
+<ul>
+    <li><b>Exclusion list:</b> Specific soldiers who should never be assigned to
+        this task (e.g., for medical or personal reasons).</li>
+    <li><b>Include Commander:</b> By default OFF -- the active commander is excluded.
+        Toggle ON if the commander should be eligible for this task.</li>
+</ul>
+
+<h2>Task Templates</h2>
+<ul>
+    <li><b>Saving:</b> After filling in task fields, click "Save as Template" to
+        store it for reuse. Templates save time-of-day, duration, roles, difficulty,
+        and soldier count.</li>
+    <li><b>Loading:</b> In the task name field, type to filter saved templates.
+        Selecting one auto-fills all fields. For tasks that cross midnight, the
+        dates default to today/tomorrow.</li>
+    <li><b>Managing:</b> Go to <b>SETTINGS &gt; SAVED TASKS</b> to view, edit,
+        duplicate, or delete templates.</li>
+</ul>
+
+<hr class="separator"/>
+
+<h1><a name="reconcile"></a>8. Running the Schedule (Reconcile)</h1>
+
+<p>
+Reconcile runs the LP solver to allocate soldiers to all active tasks,
+producing a complete schedule.
+</p>
+
+<h2>How to Run It</h2>
+<ul>
+    <li>Click <b>[ RECALCULATE SCHEDULE ]</b> in the top bar, or use the reconcile
+        button on the TASKS tab.</li>
+    <li>A progress dialog appears while the solver works (typically under 10 seconds).</li>
+    <li>After completion, all tabs refresh with the new schedule.</li>
+</ul>
+
+<h2>UNCOVERED Tasks</h2>
+<p>
+If the solver cannot fully staff a task, it marks it as <b>UNCOVERED</b>. This
+usually means there are not enough present soldiers, or time conflicts make full
+coverage impossible. When UNCOVERED tasks exist:
+</p>
+<ul>
+    <li>A warning dialog lists the affected tasks.</li>
+    <li>If any UNCOVERED task has "Include Commander" off, a <b>retry dialog</b>
+        offers to flip it on and re-run -- this adds the commander to the candidate
+        pool, which may resolve the coverage gap.</li>
+</ul>
+
+<h2>Pinned Assignments</h2>
+<p>
+If you have manually edited any assignments (they become "pinned"), reconcile
+will ask what to do: <b>keep</b> pinned assignments (solver works around them),
+<b>clear</b> them (full re-solve), or <b>cancel</b>.
+</p>
+
+<hr class="separator"/>
+
+<h1><a name="manual"></a>9. Manual Adjustments</h1>
+
+<p>
+After reconcile, you can fine-tune the schedule by hand.
+</p>
+
+<ul>
+    <li><b>Edit a block:</b> Double-click any assignment block (on the HOME tab
+        schedule panel or the TASKS tab assignment table) to open the Block Edit
+        Dialog.</li>
+    <li><b>Change soldier:</b> Use the CHANGE button to swap the assigned soldier.
+        The picker shows available soldiers sorted by role priority, with hours +/-
+        stats.</li>
+    <li><b>Add / Remove:</b> Add extra soldiers to a block or remove existing ones.</li>
+    <li><b>Pinned:</b> Any manually edited assignment becomes "pinned" -- it
+        survives the next reconcile (unless you choose to clear pinned assignments).</li>
+    <li><b>Swap:</b> Soldiers can also swap assignments with each other through the
+        Matrix bot.</li>
+</ul>
+
+<hr class="separator"/>
+
+<h1><a name="stats"></a>10. Statistics</h1>
+
+<p>
+The <b>STATS</b> tab shows unit-wide workload fairness data.
+</p>
+
+<h2>Controls</h2>
+<ul>
+    <li><b>Period selector:</b> Whole period / Month / Week / Day -- with navigation
+        arrows.</li>
+    <li><b>Day/Night toggle:</b> Combined view or Day vs Night split.</li>
+    <li><b>Weighted/Absolute:</b>
+        <ul>
+            <li><b>Weighted</b> (default): hours divided by present days -- gives
+                per-present-day fairness. A soldier present for 3 days who worked
+                6 hours = 2.0 h/day. Fairer comparison when soldiers have different
+                presence lengths.</li>
+            <li><b>Absolute</b>: raw total hours, regardless of presence duration.</li>
+        </ul>
+    </li>
+</ul>
+
+<h2>What the Numbers Mean</h2>
+<ul>
+    <li><b>+/- values</b> show hours above or below the unit average. A soldier at
+        "+1.2h" has worked 1.2 hours more than average; "-0.8h" means 0.8 hours
+        less. Green = below average, orange/red = above average.</li>
+    <li><b>Fairness spread</b>: the gap between most-loaded and least-loaded
+        soldiers.</li>
+    <li><b>Charts:</b> "Hours by Soldier" (stacked by difficulty) and "Hours Over
+        Time" (stacked by difficulty per time bucket).</li>
+</ul>
+
+<h2>PDF Export</h2>
+<p>
+Click <b>[ Export PDF ]</b> to save stats as a PDF. Options: "Current view"
+(what is on screen) or "Full report" (all combinations of weighted/absolute x
+combined/day-night).
+</p>
+
+<hr class="separator"/>
+
+<h1><a name="exports"></a>11. Exports</h1>
+
+<h2>Google Sheets</h2>
+<p>
+The app can export schedule, presence grid, and equipment data to Google
+Sheets. Setup steps:
+</p>
+<ol>
+    <li><b>Create a Google Service Account:</b>
+        Go to <b>Google Cloud Console</b>, create a project (or use an existing one),
+        enable the <b>Google Sheets API</b>, then go to
+        <b>IAM &amp; Admin &gt; Service Accounts</b> and create a service account.
+        Under the service account's Keys tab, click <b>Add Key &gt; Create new key
+        &gt; JSON</b>. Save the downloaded JSON file somewhere accessible on your
+        computer.</li>
+    <li><b>Prepare the target Google Sheet:</b>
+        Create a new Google Sheet (or use an existing one). Click <b>Share</b>, and
+        add the service account email address (found in the JSON file -- it looks
+        like <code>name@project.iam.gserviceaccount.com</code>). Give it
+        <b>Editor</b> access. Copy the sheet's URL or its ID (the long string in
+        the URL between <code>/d/</code> and <code>/edit</code>).</li>
+    <li><b>Configure in KavManager:</b>
+        Go to <b>SETTINGS &gt; EXPORTS</b>. Paste the Google Sheet ID or URL in the
+        spreadsheet field. Set the path to the JSON credentials file you
+        downloaded.</li>
+</ol>
+<p>
+Export buttons appear on the HOME tab (schedule), GRID tab (presence matrix),
+and RASHMATZ tab (team equipment).
+</p>
+
+<h2>PDF / CSV</h2>
+<ul>
+    <li><b>Default export directory</b> -- set in <b>SETTINGS &gt; EXPORTS</b>.
+        If not set, the app prompts for a save location each time.</li>
+    <li><b>Stats PDF</b> -- exported from the STATS tab (see Section 10).</li>
+    <li><b>Grid PDF</b> -- exported from the GRID tab. Shows the monthly
+        presence matrix with status codes (P = present, PA = partial,
+        A = absent).</li>
+</ul>
+
+<hr class="separator"/>
+
+<h1><a name="bot"></a>12. The Matrix Bot -- Commands</h1>
+
+<p>
+The bot is a menu-driven chat interface. Soldiers message it directly and
+navigate numbered menus.
+</p>
+
+<h2>Soldier Commands (everyone)</h2>
+<ol>
+    <li>My Schedule -- personal day/night schedule with date navigation</li>
+    <li>Team Schedule -- all soldiers grouped by task</li>
+    <li>Tasks -- task list with coverage status</li>
+    <li>Swap Assignment -- pick your assignment, pick a candidate, send request
+        (15-min timeout for the other soldier to accept/decline)</li>
+    <li>Log Unplanned Task -- multi-step: describe, start, end/ongoing, count,
+        roles, confirm. Ongoing tasks get hourly check-ins.</li>
+    <li>Report Issue -- creates a request record and notifies privileged users</li>
+    <li>My Gear / Team Gear -- add, remove, list personal and team gear</li>
+    <li>My Stats -- weighted/absolute mode, rank, day/night split</li>
+    <li>Change Language -- English or Hebrew</li>
+</ol>
+
+<h2>Privileged User Commands</h2>
+<p>
+<b>Who is privileged:</b> command chain members (set in Settings) and soldiers
+with the <b>Sargent</b> role. Privileged users see two extra menu items:
+</p>
+<ul>
+    <li><b>Commander Menu:</b> unit readiness (soldier-by-soldier breakdown),
+        unit stats, create task, create task from template, and trigger reconcile.</li>
+    <li><b>Notification Settings:</b> toggle two configurable categories:
+        <ul>
+            <li><b>soldier_reports</b> -- issue reports and unplanned task logs</li>
+            <li><b>gear_changes</b> -- team gear additions/removals</li>
+        </ul>
+        Defaults: commanders get both ON, sergeants get both OFF.
+    </li>
+</ul>
+<p>
+<b>Always-on notifications</b> (not configurable): schedule changes affecting
+individual soldiers, and UNCOVERED task alerts after reconcile or detected by
+the 120-second schedule check loop.
+</p>
+
+<hr class="separator"/>
+
+<h1><a name="tips"></a>13. Tips &amp; Troubleshooting</h1>
+
+<h2>Common Issues</h2>
+
+<h3>"All tasks show UNCOVERED"</h3>
+<p>
+Not enough present soldiers for the tasks you have created, or time conflicts
+make full coverage impossible. Reduce the number of simultaneous tasks,
+extend their windows, lower soldier count requirements, or mark more soldiers
+as present.
+</p>
+
+<h3>"Soldier not appearing in assignment options"</h3>
+<p>Check three things:</p>
+<ul>
+    <li><b>Presence:</b> Is the soldier marked as present for the task's time window?</li>
+    <li><b>Roles:</b> Does the soldier have the role required by the task?</li>
+    <li><b>Exclusion list:</b> Is the soldier on the task's exclusion list or excluded
+        as the active commander?</li>
+</ul>
+
+<h3>"Schedule looks unfair"</h3>
+<p>
+The solver optimizes over the <em>entire planning window</em>, not just today.
+A soldier who looks over-assigned today may have been idle for the past several
+days. Check the <b>Stats tab</b> -- look at the +/- values over the whole
+reserve period, not just the current day. Also check weighted vs absolute mode.
+</p>
+
+<h3>"Bot not responding"</h3>
+<ul>
+    <li>Check that the homeserver URL in Settings matches your Matrix server.</li>
+    <li>Verify the bot access token is correct and has not expired.</li>
+    <li>Check the terminal output for <code>[BOT]</code> log lines -- errors are
+        printed there.</li>
+</ul>
+
+<h3>"Reconcile takes too long"</h3>
+<p>
+Normal reconcile completes in under 10 seconds. If it takes much longer, check
+whether you have an unusually large number of overlapping tasks or very long
+task windows. The solver's problem size scales with tasks x soldiers x blocks.
+</p>
+
+<h2>General Tips</h2>
+<ul>
+    <li>Run reconcile after any change to tasks or presence -- the app will
+        prompt you when it detects changes.</li>
+    <li>Use task templates for recurring duties to avoid re-entering the same fields.</li>
+    <li>Check stats regularly to catch fairness drift early.</li>
+    <li>The bot's Commander Menu allows reconciles and task creation from chat.</li>
+</ul>
+</body>
+</html>
