@@ -6,7 +6,7 @@ Reserve unit management app that automates fair duty scheduling using linear pro
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Tests: 269+](https://img.shields.io/badge/tests-269%2B%20passing-brightgreen)
 
-<!-- TODO: Add screenshot banner -->
+![KavManager — Home & Schedule](screenshots/home_schedule.png)
 
 ## What Is This?
 
@@ -162,6 +162,20 @@ python -m pytest tests/ -v
 - Bot state machine (38 tests) — menus, swaps, notifications, privileged access
 - Task templates (26 tests) — CRUD, validation, cross-midnight, duplication
 - Eligibility, freeze points, manual edits, rollback invariants
+
+## Screenshots
+
+### Home & Schedule
+![Home & Schedule — mission calendar with readiness status, daily schedule with task assignments](screenshots/home_schedule.png)
+
+### Soldiers
+![Soldiers — soldier list with fairness metrics, individual schedule and workload chart](screenshots/soldiers.png)
+
+### Statistics
+![Statistics — unit-wide workload distribution, fairness spread, hours by soldier](screenshots/stats.png)
+
+### Presence Grid & Leave Solver
+![Presence Grid & Leave Solver — monthly presence grid, leave coverage solver with replacement suggestions](screenshots/grid_leave.png)
 
 ## Status & Roadmap
 
