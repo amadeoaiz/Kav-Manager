@@ -178,7 +178,7 @@ TEXTS = {
         'unplanned_start_time_invalid': "Invalid time format. Please use HH:MM (24h), e.g. 14:30",
         'unplanned_end_time': (
             "When did you finish or expect to finish? (HH:MM)\n"
-            "Or type \"ongoing\" if you don't know yet."
+            "Or type \"now\" if the task just finished."
         ),
         'unplanned_needs_more': (
             "Are more soldiers needed for this task?\n\n"
@@ -213,16 +213,6 @@ TEXTS = {
             "\u26a0\ufe0f {name} logged unplanned task: {description} \u2014 {date} {start}-{end}"
         ),
         'unplanned_commander_needs_more': "\nNeeds {count} soldiers ({remaining} more). Consider reconciling.",
-        'unplanned_checkin': (
-            "Are you still working on \"{description}\"?\n\n"
-            "  1. Still ongoing\n"
-            "  2. Finished now\n"
-            "  3. Finished at (type HH:MM)"
-        ),
-        'unplanned_checkin_ack': "\U0001f44d Noted, still ongoing.",
-        'unplanned_finished': "\u2705 Task \"{description}\" marked as finished at {end}.",
-        'unplanned_checkin_time_prompt': "What time did you finish? (HH:MM)",
-
         # Commander menu
         'commander_menu': (
             "Commander menu:\n\n"
@@ -524,7 +514,7 @@ TEXTS = {
         'unplanned_start_time_invalid': "\u05e4\u05d5\u05e8\u05de\u05d8 \u05dc\u05d0 \u05ea\u05e7\u05d9\u05df. \u05d4\u05e9\u05ea\u05de\u05e9 \u05d1-HH:MM, \u05dc\u05de\u05e9\u05dc 14:30",
         'unplanned_end_time': (
             "\u05de\u05ea\u05d9 \u05e1\u05d9\u05d9\u05de\u05ea \u05d0\u05d5 \u05e6\u05e4\u05d5\u05d9 \u05dc\u05e1\u05d9\u05d9\u05dd? (HH:MM)\n"
-            "\u05d0\u05d5 \u05d4\u05e7\u05dc\u05d3 \"ongoing\" \u05d0\u05dd \u05e2\u05d3\u05d9\u05d9\u05df \u05dc\u05d0 \u05d9\u05d3\u05d5\u05e2."
+            "\u05d0\u05d5 \u05d4\u05e7\u05dc\u05d3 \"now\" \u05d0\u05dd \u05d4\u05de\u05e9\u05d9\u05de\u05d4 \u05d4\u05e1\u05ea\u05d9\u05d9\u05de\u05d4 \u05e2\u05db\u05e9\u05d9\u05d5."
         ),
         'unplanned_needs_more': (
             "\u05e6\u05e8\u05d9\u05da \u05e2\u05d5\u05d3 \u05d7\u05d9\u05d9\u05dc\u05d9\u05dd \u05dc\u05de\u05e9\u05d9\u05de\u05d4 \u05d4\u05d6\u05d5?\n\n"
@@ -559,15 +549,6 @@ TEXTS = {
             "\u26a0\ufe0f {name} \u05d3\u05d9\u05d5\u05d5\u05d7 \u05de\u05e9\u05d9\u05de\u05d4 \u05dc\u05d0 \u05de\u05ea\u05d5\u05db\u05e0\u05e0\u05ea: {description} \u2014 {date} {start}-{end}"
         ),
         'unplanned_commander_needs_more': "\n\u05e6\u05e8\u05d9\u05da {count} \u05d7\u05d9\u05d9\u05dc\u05d9\u05dd (\u05e2\u05d5\u05d3 {remaining}). \u05e9\u05e7\u05d5\u05dc \u05dc\u05d4\u05e8\u05d9\u05e5 \u05e9\u05d9\u05d1\u05d5\u05e5.",
-        'unplanned_checkin': (
-            "\u05d0\u05ea\u05d4 \u05e2\u05d3\u05d9\u05d9\u05df \u05e2\u05d5\u05d1\u05d3 \u05e2\u05dc \"{description}\"?\n\n"
-            "  1. \u05e2\u05d3\u05d9\u05d9\u05df \u05e4\u05e2\u05d9\u05dc\n"
-            "  2. \u05e1\u05d9\u05d9\u05de\u05ea\u05d9 \u05e2\u05db\u05e9\u05d9\u05d5\n"
-            "  3. \u05e1\u05d9\u05d9\u05de\u05ea\u05d9 \u05d1- (HH:MM)"
-        ),
-        'unplanned_checkin_ack': "\U0001f44d \u05e0\u05e8\u05e9\u05dd, \u05e2\u05d3\u05d9\u05d9\u05df \u05e4\u05e2\u05d9\u05dc.",
-        'unplanned_finished': "\u2705 \u05de\u05e9\u05d9\u05de\u05d4 \"{description}\" \u05e1\u05d5\u05de\u05e0\u05d4 \u05db\u05de\u05d5\u05e1\u05ea\u05d9\u05d9\u05de\u05ea \u05d1-{end}.",
-        'unplanned_checkin_time_prompt': "\u05d1\u05d0\u05d9\u05d6\u05d5 \u05e9\u05e2\u05d4 \u05e1\u05d9\u05d9\u05de\u05ea? (HH:MM)",
 
         # Commander menu — TODO: translate
         'commander_menu': (

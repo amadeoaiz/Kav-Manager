@@ -27,6 +27,7 @@ from nio import (
     InviteMemberEvent,
     RoomCreateResponse,
     RoomResolveAliasResponse,
+    MegolmEvent,
 )
 
 from src.core.paths import get_project_root, get_data_dir
@@ -174,9 +175,6 @@ async def _notify_privileged(client, db, message: str, category: str,
 # ── Swap timeout tasks: requester_matrix_id -> asyncio.Task ──────────────────
 _swap_timeout_tasks: dict[str, asyncio.Task] = {}
 
-# ── Ongoing unplanned task check-in tasks: matrix_id -> asyncio.Task ─────────
-_ongoing_checkin_tasks: dict[str, asyncio.Task] = {}
-
 
 def _parse_hhmm(text: str) -> time | None:
     """Parse HH:MM (24h) from user input. Returns time or None."""
@@ -265,6 +263,7 @@ async def _send(client: AsyncClient, room_id: str, text: str):
             room_id=room_id,
             message_type="m.room.message",
             content={"msgtype": "m.text", "body": text},
+            ignore_unverified_devices=True,
         )
     except Exception:
         logger.exception("Failed to send message to %s", room_id)
@@ -1602,9 +1601,8 @@ async def _handle_unplanned_end_time(client, room, db, soldier, sender, body):
         await _show_main_menu(client, room, db, soldier, sender)
         return
 
-    if body.strip().lower() == "ongoing":
-        us["data"]["ongoing"] = True
-        us["data"]["end_time"] = None
+    if body.strip().lower() == "now":
+        us["data"]["end_time"] = datetime.now().isoformat()
         _set_state(sender, "unplanned_needs_more")
         await _send(client, room.room_id, t(lang, 'unplanned_needs_more'))
         return
@@ -1621,7 +1619,6 @@ async def _handle_unplanned_end_time(client, room, db, soldier, sender, body):
     if end_dt <= start_dt:
         end_dt += timedelta(days=1)
     us["data"]["end_time"] = end_dt.isoformat()
-    us["data"]["ongoing"] = False
     _set_state(sender, "unplanned_needs_more")
     await _send(client, room.room_id, t(lang, 'unplanned_needs_more'))
 
@@ -1734,10 +1731,8 @@ async def _show_unplanned_confirm(client, room, db, soldier, sender):
     lang = us["lang"]
     d = us["data"]
     start_dt = datetime.fromisoformat(d["start_time"])
-    end_str = "ongoing"
-    if d.get("end_time"):
-        end_dt = datetime.fromisoformat(d["end_time"])
-        end_str = end_dt.strftime('%H:%M')
+    end_dt = datetime.fromisoformat(d["end_time"])
+    end_str = end_dt.strftime('%H:%M')
     roles = d.get("selected_roles", {})
     roles_str = ", ".join(f"{n} \u00d7{q}" for n, q in roles.items()) if roles else "Any"
     _set_state(sender, "unplanned_confirm")
@@ -1763,11 +1758,7 @@ async def _handle_unplanned_confirm(client, room, db, soldier, sender, body):
 
     d = us["data"]
     start_dt = datetime.fromisoformat(d["start_time"])
-    ongoing = d.get("ongoing", False)
-    if d.get("end_time"):
-        end_dt = datetime.fromisoformat(d["end_time"])
-    else:
-        end_dt = datetime.now()  # ongoing: use now as temporary end
+    end_dt = datetime.fromisoformat(d["end_time"])
 
     description = d["description"]
     required_count = d.get("required_count", 1)
@@ -1791,7 +1782,9 @@ async def _handle_unplanned_confirm(client, room, db, soldier, sender, body):
             coverage_status='UNCOVERED',
         )
     except ValueError:
-        # Coverage check may fail — create without validation
+        # Coverage check may fail — rollback the flushed-but-uncommitted
+        # task from create_task, then create without validation.
+        db.rollback()
         new_task = Task(
             real_title=f"[UNPLANNED] {description}",
             start_time=start_dt,
@@ -1806,9 +1799,10 @@ async def _handle_unplanned_confirm(client, room, db, soldier, sender, body):
         )
         task_svc.save_task(new_task)
 
-    # Create assignment for the reporting soldier
+    # Create a pinned assignment for the reporting soldier so reconcile
+    # never reassigns this task to someone else.
     sched_svc = ScheduleService(db)
-    sched_svc.add_assignment(
+    asgn = sched_svc.add_assignment(
         task_id=new_task.id,
         soldier_id=soldier.id,
         start_time=start_dt,
@@ -1816,15 +1810,19 @@ async def _handle_unplanned_confirm(client, room, db, soldier, sender, body):
         weight=1.0,
         pin=True,
     )
+    asgn.pending_review = True
+
+    # The reporting soldier covers the task — mark it OK.
+    new_task.coverage_status = 'OK'
+    db.commit()
 
     # Notify privileged users
-    end_str = "ongoing" if ongoing else end_dt.strftime('%H:%M')
     notify_text = t('en', 'unplanned_commander_notify',
                     name=display_name(soldier),
                     description=description,
                     date=start_dt.strftime('%d/%m'),
                     start=start_dt.strftime('%H:%M'),
-                    end=end_str)
+                    end=end_dt.strftime('%H:%M'))
     if required_count > 1:
         notify_text += t('en', 'unplanned_commander_needs_more',
                          count=required_count, remaining=required_count - 1)
@@ -1834,142 +1832,8 @@ async def _handle_unplanned_confirm(client, room, db, soldier, sender, body):
 
     await _send(client, room.room_id, t(lang, 'unplanned_created'))
 
-    # If ongoing, start hourly check-in
-    if ongoing:
-        _start_ongoing_checkin(client, sender, soldier.id, new_task.id, description)
-
     _go_main_menu(sender)
     await _show_main_menu(client, room, db, soldier, sender)
-
-
-def _start_ongoing_checkin(client, matrix_id, soldier_id, task_id, description):
-    """Start an hourly check-in loop for an ongoing unplanned task."""
-    old = _ongoing_checkin_tasks.pop(matrix_id, None)
-    if old:
-        old.cancel()
-
-    async def _checkin_loop():
-        while True:
-            await asyncio.sleep(3600)  # 60 minutes
-            us = _get_state(matrix_id)
-            lang = us.get("lang", "en")
-
-            # Save current state
-            prev_state = us["state"]
-            prev_data = dict(us["data"])
-
-            _set_state(matrix_id, "unplanned_checkin",
-                       checkin_task_id=task_id,
-                       checkin_soldier_id=soldier_id,
-                       checkin_description=description,
-                       checkin_previous_state=prev_state,
-                       checkin_previous_data=prev_data)
-
-            await _send_to_user(client, matrix_id,
-                                t(lang, 'unplanned_checkin', description=description))
-
-    _ongoing_checkin_tasks[matrix_id] = asyncio.create_task(_checkin_loop())
-
-
-async def _handle_unplanned_checkin(client, room, db, soldier, sender, body):
-    us = _get_state(sender)
-    lang = us["lang"]
-    d = us["data"]
-    task_id = d.get("checkin_task_id")
-    description = d.get("checkin_description", "?")
-    prev_state = d.get("checkin_previous_state")
-    prev_data = d.get("checkin_previous_data", {})
-
-    def _restore():
-        if prev_state:
-            us["state"] = prev_state
-            us["data"] = prev_data
-        else:
-            _go_main_menu(sender)
-
-    if body == "1":
-        # Still ongoing
-        await _send(client, room.room_id, t(lang, 'unplanned_checkin_ack'))
-        _restore()
-        return
-
-    if body == "2":
-        # Finished now
-        end_dt = datetime.now()
-        _finish_ongoing_task(db, sender, task_id, end_dt)
-        await _send(client, room.room_id,
-                    t(lang, 'unplanned_finished',
-                      description=description, end=end_dt.strftime('%H:%M')))
-        _restore()
-        return
-
-    if body == "3":
-        # Ask for time
-        _set_state(sender, "unplanned_checkin_time",
-                   checkin_task_id=task_id,
-                   checkin_description=description,
-                   checkin_previous_state=prev_state,
-                   checkin_previous_data=prev_data)
-        await _send(client, room.room_id, t(lang, 'unplanned_checkin_time_prompt'))
-        return
-
-    # Try parsing as HH:MM directly
-    parsed = _parse_hhmm(body)
-    if parsed:
-        end_dt = datetime.combine(date.today(), parsed)
-        _finish_ongoing_task(db, sender, task_id, end_dt)
-        await _send(client, room.room_id,
-                    t(lang, 'unplanned_finished',
-                      description=description, end=end_dt.strftime('%H:%M')))
-        _restore()
-        return
-
-    await _send(client, room.room_id, t(lang, 'invalid_option'))
-
-
-async def _handle_unplanned_checkin_time(client, room, db, soldier, sender, body):
-    us = _get_state(sender)
-    lang = us["lang"]
-    d = us["data"]
-    task_id = d.get("checkin_task_id")
-    description = d.get("checkin_description", "?")
-    prev_state = d.get("checkin_previous_state")
-    prev_data = d.get("checkin_previous_data", {})
-
-    parsed = _parse_hhmm(body)
-    if not parsed:
-        await _send(client, room.room_id, t(lang, 'unplanned_start_time_invalid'))
-        return
-
-    end_dt = datetime.combine(date.today(), parsed)
-    _finish_ongoing_task(db, sender, task_id, end_dt)
-    await _send(client, room.room_id,
-                t(lang, 'unplanned_finished',
-                  description=description, end=end_dt.strftime('%H:%M')))
-
-    if prev_state:
-        us["state"] = prev_state
-        us["data"] = prev_data
-    else:
-        _go_main_menu(sender)
-
-
-def _finish_ongoing_task(db, matrix_id, task_id, end_dt):
-    """Update task and assignment end times, cancel check-in loop."""
-    checkin_task = _ongoing_checkin_tasks.pop(matrix_id, None)
-    if checkin_task:
-        checkin_task.cancel()
-
-    task_svc = TaskService(db)
-    task = task_svc.get_task(task_id)
-    if task:
-        task_svc.update_task(task_id, end_time=end_dt)
-
-    # Update the soldier's assignment for this task
-    assignments = task_svc.get_task_assignments(task_id)
-    for asgn in assignments:
-        asgn.end_time = end_dt
-    db.commit()
 
 
 # ── Commander menu ───────────────────────────────────────────────────────────
@@ -2506,7 +2370,9 @@ async def _handle_commander_create_confirm(client, room, db, soldier, sender, bo
             hardness=d.get("task_difficulty", 3),
         )
     except ValueError:
-        # Fallback if coverage check fails
+        # Coverage check failed — rollback the flushed-but-uncommitted
+        # task from create_task, then create without validation.
+        db.rollback()
         new_task = Task(
             real_title=d["task_name"],
             start_time=start_dt,
@@ -2890,8 +2756,6 @@ _STATE_HANDLERS = {
     "unplanned_role_select": _handle_unplanned_role_select,
     "unplanned_role_quantity": _handle_unplanned_role_quantity,
     "unplanned_confirm": _handle_unplanned_confirm,
-    "unplanned_checkin": _handle_unplanned_checkin,
-    "unplanned_checkin_time": _handle_unplanned_checkin_time,
     # Commander menu
     "commander_menu": _handle_commander_menu,
     "commander_readiness": _handle_commander_readiness,
@@ -3104,10 +2968,23 @@ class MatrixBotRunner:
             self.running = False
 
     async def _async_main(self):
+        # E2E Encryption Setup
+        # - AsyncClient must NOT use a hardcoded device_id — the device_id
+        #   is discovered via whoami() to match the server's token→device mapping.
+        # - Store path: data/nio_store (via get_data_dir())
+        # - client.load_store() must be called AFTER setting device_id
+        # - Device keys are uploaded after the first sync
+        # - ignore_unverified_devices=True on room_send (bot can't verify interactively)
+        # - If the access token changes, delete data/nio_store/ to reset the olm state
+
+        # Silence verbose nio library logging (room handling, sync details)
+        logging.getLogger("nio").setLevel(logging.WARNING)
+
         config = AsyncClientConfig(
             encryption_enabled=True,
             store_sync_tokens=True,
         )
+        logger.info("nio_store path: %s", NIO_STORE_PATH)
         client = AsyncClient(
             self.homeserver,
             self.user,
@@ -3116,10 +2993,23 @@ class MatrixBotRunner:
         )
         self._client = client
 
-        # Login with access token
         client.access_token = self.token
         client.user_id = self.user
-        client.device_id = "KAVBOT"
+
+        # Discover the real device_id from the server
+        whoami = await client.whoami()
+        if hasattr(whoami, "device_id") and whoami.device_id:
+            client.device_id = whoami.device_id
+            logger.info("Device ID from server: %s", client.device_id)
+        else:
+            logger.warning("whoami did not return device_id: %s", whoami)
+
+        # Load the olm/megolm store — required for E2E decryption.
+        client.load_store()
+        if client.olm:
+            logger.info("Olm store loaded (device_id=%s)", client.device_id)
+        else:
+            logger.warning("Olm store NOT loaded — E2E decryption unavailable")
 
         # Record boot time so we can ignore old messages
         client._boot_ts = int(_time.time() * 1000)
@@ -3127,18 +3017,30 @@ class MatrixBotRunner:
         # Auto-accept room invites
         client.add_event_callback(self._on_invite, InviteMemberEvent)
 
-        # Message handler
+        # Message handler — fires for successfully decrypted messages
         client.add_event_callback(
             lambda room, event: on_message(client, room, event),
             RoomMessageText,
         )
 
-        # Trust all device keys on first use (TOFU)
-        client.add_to_device_callback(self._auto_trust_keys)
+        # Undecryptable E2E messages — log once per room+session
+        client.add_event_callback(self._on_megolm, MegolmEvent)
 
         # Do an initial sync to populate rooms
         logger.info("Matrix bot: initial sync...")
         await client.sync(timeout=10000, full_state=True)
+
+        # Upload device keys so other clients can encrypt for us.
+        if client.should_upload_keys:
+            resp = await client.keys_upload()
+            logger.debug("keys_upload response: %s", resp)
+            if hasattr(resp, "transport_response") and \
+               getattr(resp.transport_response, "status_code", 200) >= 400:
+                logger.warning(
+                    "E2E key upload failed — encrypted messages won't work. "
+                    "The bot may need a fresh access token. "
+                    "Re-login the bot account and update the token in Settings."
+                )
 
         self.running = True
         logger.info("KavManager Matrix Bot running (embedded)")
@@ -3187,14 +3089,15 @@ class MatrixBotRunner:
             await self._client.join(room.room_id)
             logger.info("Joined room %s", room.room_id)
 
-    async def _auto_trust_keys(self, event):
-        """TOFU: automatically trust device keys on first encounter."""
-        if not self._client:
-            return
-        for device_list in self._client.device_store.values():
-            for device in device_list.values():
-                if not device.verified:
-                    self._client.verify_device(device)
+    _seen_megolm: set = set()
+
+    async def _on_megolm(self, room: MatrixRoom, event: MegolmEvent):
+        """Log undecryptable E2E messages (deduplicated per room+session)."""
+        key = (room.room_id, event.session_id)
+        if key not in self._seen_megolm:
+            self._seen_megolm.add(key)
+            logger.warning("Undecryptable message: room=%s sender=%s session=%s",
+                           room.room_id, event.sender, event.session_id)
 
     async def _schedule_check_loop(self, client: AsyncClient):
         """Run schedule change detection every 120 seconds."""

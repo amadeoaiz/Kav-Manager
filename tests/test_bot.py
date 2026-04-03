@@ -35,7 +35,7 @@ class MockMatrixClient:
         self.sent: list[tuple[str, str]] = []  # (room_id, body)
         self._rooms_created = 0
 
-    async def room_send(self, room_id, message_type, content):
+    async def room_send(self, room_id, message_type, content, **kwargs):
         self.sent.append((room_id, content.get("body", "")))
 
     async def room_create(self, is_direct=True, invite=None, initial_state=None):
@@ -203,7 +203,6 @@ def reset_bot_state():
     bot._user_state.clear()
     bot._dm_rooms.clear()
     bot._swap_timeout_tasks.clear()
-    bot._ongoing_checkin_tasks.clear()
     bot._last_schedule_snapshot.clear()
     bot._last_uncovered_tasks.clear()
     yield
@@ -694,3 +693,155 @@ class TestMyStats:
         simulate(client, db, "@romeo:test", "9")
         msg = client.last_message()
         assert "stats" in msg.lower() or "Total hours" in msg
+
+
+class TestUnplannedTask:
+    """Unplanned task creates a pinned assignment for the reporting soldier."""
+
+    def test_unplanned_creates_pinned_assignment(self, client, db):
+        """report_unplanned_task creates a pinned, pending_review assignment."""
+        from src.services.request_service import RequestService
+        s = _make_soldier(db, "Alpha", "@alpha:test")
+        now = datetime.now()
+        start = now - timedelta(hours=1)
+        end = now + timedelta(hours=1)
+
+        svc = RequestService(db)
+        asgn = svc.report_unplanned_task(
+            soldier_id=s.id,
+            start_time=start,
+            end_time=end,
+            description="Emergency generator repair",
+        )
+
+        assert asgn.soldier_id == s.id
+        assert asgn.is_pinned is True
+        assert asgn.pending_review is True
+        assert asgn.task is not None
+        assert "[UNPLANNED]" in asgn.task.real_title
+
+    def test_pinned_survives_reconcile(self, client, db):
+        """A pinned unplanned assignment is not replaced by reconcile."""
+        from src.services.request_service import RequestService
+        s1 = _make_soldier(db, "Bravo", "@bravo:test")
+        _make_soldier(db, "Charlie", "@charlie:test")
+
+        now = datetime.now()
+        start = now - timedelta(minutes=30)
+        end = now + timedelta(hours=2)
+
+        # Add presence for both soldiers
+        for s in [s1, db.query(Soldier).filter(Soldier.name == "Charlie").first()]:
+            db.add(PresenceInterval(
+                soldier_id=s.id,
+                start_time=datetime.combine(now.date(), time(0, 0)),
+                end_time=datetime.combine(now.date(), time(23, 59, 59)),
+                status='PRESENT',
+            ))
+        db.commit()
+
+        svc = RequestService(db)
+        asgn = svc.report_unplanned_task(
+            soldier_id=s1.id,
+            start_time=start,
+            end_time=end,
+            description="Fence patrol",
+        )
+        task_id = asgn.task_id
+
+        # The assignment should still belong to Bravo after reconcile
+        surviving = db.query(TaskAssignment).filter(
+            TaskAssignment.task_id == task_id,
+            TaskAssignment.soldier_id == s1.id,
+        ).first()
+        assert surviving is not None
+        assert surviving.is_pinned is True
+
+    def test_bot_unplanned_confirm_creates_assignment(self, client, db):
+        """The bot confirm handler creates a pinned OK assignment."""
+        s = _make_soldier(db, "Delta", "@delta:test")
+        now = datetime.now()
+
+        # Set up bot state as if user completed the unplanned flow
+        bot._user_state["@delta:test"] = {
+            "state": "unplanned_confirm",
+            "lang": "en",
+            "data": {
+                "description": "Water pump fix",
+                "start_time": (now - timedelta(hours=1)).isoformat(),
+                "end_time": (now + timedelta(hours=1)).isoformat(),
+                "required_count": 1,
+                "selected_roles": [],
+            },
+        }
+
+        # Simulate confirming with "1"
+        simulate(client, db, "@delta:test", "1")
+
+        # Check task was created with OK status
+        task = db.query(Task).filter(
+            Task.real_title.contains("[UNPLANNED] Water pump fix")
+        ).first()
+        assert task is not None
+        assert task.coverage_status == 'OK'
+
+        # Check assignment exists, is pinned, and belongs to Delta
+        asgn = db.query(TaskAssignment).filter(
+            TaskAssignment.task_id == task.id,
+        ).first()
+        assert asgn is not None
+        assert asgn.soldier_id == s.id
+        assert asgn.is_pinned is True
+        assert asgn.pending_review is True
+
+
+class TestCommanderCreateTask:
+    """Commander task creation via bot is separate from unplanned tasks."""
+
+    def test_commander_create_task(self, client, db):
+        """Commander creates a task via bot — no assignment, no pinning."""
+        from src.core.models import UnitConfig
+        config = db.query(UnitConfig).first()
+        s = _make_soldier(db, "Cmdr", "@cmdr:test")
+        config.command_chain = [s.id]
+        db.commit()
+
+        now = datetime.now()
+        start = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        end = start + timedelta(hours=4)
+
+        # Set up bot state as if commander completed the create task flow
+        bot._user_state["@cmdr:test"] = {
+            "state": "commander_create_confirm",
+            "lang": "en",
+            "data": {
+                "task_name": "Guard Duty",
+                "task_start": start.isoformat(),
+                "task_end": end.isoformat(),
+                "task_count": 1,
+                "task_difficulty": 3,
+                "task_fractionable": True,
+                "selected_roles": [],
+            },
+        }
+
+        simulate(client, db, "@cmdr:test", "1")
+
+        # Task should exist
+        task = db.query(Task).filter(
+            Task.real_title == "Guard Duty"
+        ).first()
+        assert task is not None
+        assert task.is_active is True
+
+        # No assignment yet — reconcile hasn't run
+        asgn = db.query(TaskAssignment).filter(
+            TaskAssignment.task_id == task.id,
+        ).first()
+        assert asgn is None
+
+        # No ghost duplicate tasks
+        count = db.query(Task).filter(
+            Task.real_title == "Guard Duty"
+        ).count()
+        assert count == 1

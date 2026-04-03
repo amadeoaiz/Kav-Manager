@@ -57,6 +57,7 @@ class RequestService:
             end_time=end_time,
             final_weight_applied=points_earned,
             pending_review=True,
+            is_pinned=True,
         )
         self.db.add(assignment)
 

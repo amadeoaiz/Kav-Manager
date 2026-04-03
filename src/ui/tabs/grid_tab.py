@@ -747,6 +747,32 @@ class GridTab(QWidget):
         days = sorted([self._month.replace(day=col) for col in cols])
         return soldier, days
 
+    def _get_multi_row_selection(self):
+        """Returns list of (soldier, sorted_days) tuples for all selected rows, or [] if <2 rows."""
+        indexes = [
+            idx for idx in self._table.selectedIndexes()
+            if idx.column() > 0
+        ]
+        if not indexes:
+            return []
+
+        by_row: dict[int, set[int]] = {}
+        for idx in indexes:
+            by_row.setdefault(idx.row(), set()).add(idx.column())
+
+        if len(by_row) < 2:
+            return []
+
+        result = []
+        for row in sorted(by_row):
+            soldier_id = self._table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            soldier = self._soldier_svc.get_soldier(soldier_id)
+            if soldier:
+                cols = sorted(by_row[row])
+                days = sorted([self._month.replace(day=col) for col in cols])
+                result.append((soldier, days))
+        return result
+
     def _on_selection_changed(self, _selected, _deselected):
         """Highlight the soldier name for any row that has selected day cells."""
         try:
@@ -768,14 +794,15 @@ class GridTab(QWidget):
     # ── context menu ──────────────────────────────────────────────────────────
 
     def _on_context_menu(self, pos):
+        # Check for multi-row selection first
+        multi = self._get_multi_row_selection()
+        if multi:
+            self._on_bulk_context_menu(pos, multi)
+            return
+
         soldier, days = self._get_selection()
 
         if not soldier or not days:
-            if self._table.selectedIndexes():
-                QMessageBox.information(
-                    self, "Selection",
-                    "Please select cells from a single soldier row at a time."
-                )
             return
 
         menu = QMenu(self)
@@ -800,7 +827,7 @@ class GridTab(QWidget):
                 lambda: self._mark_block_absent(soldier, d1, dn)
             )
 
-        # Leave coverage helper using the selected date range (“ask for leave” flow)
+        # Leave coverage helper using the selected date range ("ask for leave" flow)
         if len(days) >= 1:
             d1, dn = days[0], days[-1]
             menu.addSeparator()
@@ -825,6 +852,44 @@ class GridTab(QWidget):
         menu.addAction(
             "Set ACTIVE for entire reserve period",
             lambda: self._set_active_whole_period(soldier),
+        )
+
+        menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _on_bulk_context_menu(self, pos, multi):
+        """Show a bulk-action context menu when multiple soldier rows are selected."""
+        n = len(multi)
+        # Determine common date range across all selected soldiers
+        all_days = []
+        for _, days in multi:
+            all_days.extend(days)
+        if not all_days:
+            return
+        d1, dn = min(all_days), max(all_days)
+
+        menu = QMenu(self)
+
+        menu.addAction(
+            f"Mark {n} soldiers as Present",
+            lambda: self._bulk_mark_present(multi, d1, dn),
+        )
+        menu.addAction(
+            f"Mark {n} soldiers as Absent",
+            lambda: self._bulk_mark_absent(multi, d1, dn),
+        )
+        menu.addSeparator()
+        menu.addAction(
+            f"Set {n} soldiers Active",
+            lambda: self._bulk_set_drafted(multi, d1, dn, True),
+        )
+        menu.addAction(
+            f"Set {n} soldiers Not Active",
+            lambda: self._bulk_set_drafted(multi, d1, dn, False),
+        )
+        menu.addSeparator()
+        menu.addAction(
+            f"Set {n} soldiers Active for entire reserve period",
+            lambda: self._bulk_set_active_whole_period(multi),
         )
 
         menu.exec(self._table.viewport().mapToGlobal(pos))
@@ -1121,6 +1186,202 @@ class GridTab(QWidget):
 
         # Delegate to existing method which handles confirmation + merge logic
         self._set_drafted_range(soldier, d_from, d_to_date, True)
+
+    # ── bulk actions ────────────────────────────────────────────────────────────
+
+    def _bulk_mark_present(self, multi, d1: date, dn: date):
+        """Mark multiple soldiers as present. Single day → presence dialog, range → block present."""
+        n = len(multi)
+        single_day = (d1 == dn)
+
+        if single_day:
+            dlg = _PresenceDialog(f"{n} soldiers", d1, parent=self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            if dlg.is_full():
+                start_dt = datetime.combine(d1, time(0, 0))
+                end_dt = datetime.combine(d1, time(23, 59, 59))
+            else:
+                arr = dlg.arrival_time()
+                dep = dlg.departure_time()
+                start_dt = datetime.combine(d1, time(arr.hour(), arr.minute()))
+                end_dt = datetime.combine(d1, time(dep.hour(), dep.minute()))
+
+            ans = QMessageBox.question(
+                self, "Confirm",
+                f"Mark <b>{n} soldiers</b> as PRESENT on <b>{d1.strftime('%d %b %Y')}</b>?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+
+            for soldier, _ in multi:
+                if not self._check_drafted(soldier, d1):
+                    continue
+                self._soldier_svc.insert_presence(soldier.id, start_dt, end_dt, "PRESENT")
+                try:
+                    self._soldier_svc.recalculate_service_counters(soldier.id)
+                except Exception:
+                    pass
+        else:
+            ans = QMessageBox.question(
+                self, "Confirm",
+                f"Mark <b>{n} soldiers</b> PRESENT<br>"
+                f"from <b>{d1.strftime('%d %b')} 12:00</b> to <b>{dn.strftime('%d %b')} 12:00</b>?<br>"
+                f"<small>({d1.strftime('%d %b')} and {dn.strftime('%d %b')} will be partial days.)</small>",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+
+            overrides = {}
+            d = d1
+            while d <= dn:
+                overrides[d] = "P"
+                d += timedelta(days=1)
+
+            for soldier, _ in multi:
+                any_drafted = any(
+                    self._check_drafted(soldier, d1 + timedelta(days=off))
+                    for off in range((dn - d1).days + 1)
+                )
+                if not any_drafted:
+                    continue
+                self._soldier_svc.normalize_presence_window(
+                    soldier_id=soldier.id,
+                    day_from=d1 - timedelta(days=1),
+                    day_to=dn + timedelta(days=1),
+                    overrides=overrides,
+                    expand_same_state="P",
+                )
+                try:
+                    self._soldier_svc.recalculate_service_counters(soldier.id)
+                except Exception:
+                    pass
+
+        try:
+            self.mw.set_dirty(True)
+        except Exception:
+            pass
+        self._soldier_svc.expire_all()
+        self._table.clearSelection()
+        self._rebuild()
+        if hasattr(self.mw, "home_tab") and hasattr(self.mw.home_tab, "refresh"):
+            self.mw.home_tab.refresh()
+
+    def _bulk_mark_absent(self, multi, d1: date, dn: date):
+        """Mark multiple soldiers as absent for the selected date range."""
+        n = len(multi)
+        return_day = dn + timedelta(days=1)
+
+        if d1 == dn:
+            msg = (
+                f"Mark <b>{n} soldiers</b> ABSENT on <b>{d1.strftime('%d %b %Y')}</b>?<br>"
+                f"<small>{d1.strftime('%d %b')} will be partial (departure) and "
+                f"{return_day.strftime('%d %b')} partial (return).</small>"
+            )
+        else:
+            msg = (
+                f"Mark <b>{n} soldiers</b> ABSENT<br>"
+                f"from <b>{d1.strftime('%d %b')}</b> to <b>{dn.strftime('%d %b')}</b>?<br>"
+                f"<small>{d1.strftime('%d %b')} = departure (partial), "
+                f"{return_day.strftime('%d %b')} = return (partial).</small>"
+            )
+        ans = QMessageBox.question(
+            self, "Confirm", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+
+        overrides = {}
+        d = d1
+        while d <= dn:
+            overrides[d] = "A"
+            d += timedelta(days=1)
+        overrides[return_day] = "P"
+
+        for soldier, _ in multi:
+            any_drafted = any(
+                self._check_drafted(soldier, d1 + timedelta(days=off))
+                for off in range((dn - d1).days + 1)
+            )
+            if not any_drafted:
+                continue
+            self._soldier_svc.normalize_presence_window(
+                soldier_id=soldier.id,
+                day_from=d1 - timedelta(days=1),
+                day_to=return_day + timedelta(days=1),
+                overrides=overrides,
+                expand_same_state="A",
+            )
+            try:
+                self._soldier_svc.recalculate_service_counters(soldier.id)
+            except Exception:
+                pass
+
+        try:
+            self.mw.set_dirty(True)
+        except Exception:
+            pass
+        self._soldier_svc.expire_all()
+        self._table.clearSelection()
+        self._rebuild()
+        if hasattr(self.mw, "home_tab") and hasattr(self.mw.home_tab, "refresh"):
+            self.mw.home_tab.refresh()
+
+    def _bulk_set_drafted(self, multi, d1: date, dn: date, drafted: bool):
+        """Set active/not-active status for multiple soldiers."""
+        n = len(multi)
+        label = "ACTIVE" if drafted else "NOT ACTIVE"
+        ans = QMessageBox.question(
+            self, "Confirm",
+            f"Set <b>{n} soldiers</b> as <b>{label}</b> for "
+            f"<b>{d1.strftime('%d %b')} → {dn.strftime('%d %b')}</b>?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+
+        range_start = datetime.combine(d1, time(0, 0))
+        range_end = datetime.combine(dn + timedelta(days=1), time(0, 0))
+
+        for soldier, _ in multi:
+            try:
+                self._soldier_svc.set_drafted_range(soldier.id, range_start, range_end, drafted)
+            except Exception:
+                pass
+
+        try:
+            self.mw.set_dirty(True)
+        except Exception:
+            pass
+        self._soldier_svc.expire_all()
+        self._table.clearSelection()
+        self._rebuild()
+        if hasattr(self.mw, "home_tab") and hasattr(self.mw.home_tab, "refresh"):
+            self.mw.home_tab.refresh()
+
+    def _bulk_set_active_whole_period(self, multi):
+        """Set multiple soldiers as active for the entire reserve period."""
+        from src.domain.reserve_period import resolve_reserve_period
+
+        rp_start, rp_end = resolve_reserve_period(self.db)
+        if rp_start is None or rp_end is None:
+            QMessageBox.warning(
+                self,
+                "No reserve period",
+                "No reserve period defined.\n"
+                "Set it in Settings → Unit, or draft at least one soldier first.",
+            )
+            return
+
+        d_from = rp_start.date() if hasattr(rp_start, "date") else rp_start
+        d_to_date = rp_end.date() if hasattr(rp_end, "date") else rp_end
+        if hasattr(rp_end, "hour") and rp_end.hour == 0 and rp_end.minute == 0:
+            d_to_date = d_to_date - timedelta(days=1)
+
+        self._bulk_set_drafted(multi, d_from, d_to_date, True)
 
     def _open_leave_coverage(self, soldier: Soldier, d_from: date, d_to: date):
         """Open the leave coverage dialog prefilled with the selected range."""
